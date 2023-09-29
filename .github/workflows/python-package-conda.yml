@@ -3,8 +3,9 @@
 name: Testing your commit on libRAINBOW
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ test/auto-unit-test ]
   pull_request:
     branches: [ main ]
 jobs:
