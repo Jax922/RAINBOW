@@ -5,9 +5,9 @@ name: Testing your commit on libRAINBOW
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ test/unit-test ]
   pull_request:
-    branches: [ main ]
+    branches: [ test/unit-test ]
 jobs:
   miniconda:
     name: os ${{ matrix.os }} python ${{ matrix.python-version }}
