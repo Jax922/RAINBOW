@@ -9,6 +9,16 @@ import rainbow.simulators.prox_soft_bodies.solver as SOLVER
 from rainbow.simulators.prox_soft_bodies.types import *
 import numpy as np
 
+def _avg_tetrahedron_length(body):
+    tet_lengths = []
+    for tet in body.T:
+        tet_lengths.append(np.linalg.norm(body.x[tet[0]] - body.x[tet[1]]))
+        tet_lengths.append(np.linalg.norm(body.x[tet[0]] - body.x[tet[2]]))
+        tet_lengths.append(np.linalg.norm(body.x[tet[0]] - body.x[tet[3]]))
+        tet_lengths.append(np.linalg.norm(body.x[tet[1]] - body.x[tet[2]]))
+        tet_lengths.append(np.linalg.norm(body.x[tet[1]] - body.x[tet[3]]))
+        tet_lengths.append(np.linalg.norm(body.x[tet[2]] - body.x[tet[3]]))
+    return np.mean(tet_lengths)
 
 
 def create_engine() -> Engine:
@@ -73,13 +83,17 @@ def create_soft_body(engine, body_name, V, T) -> None:
     # Create bounding volume hierarchy data-structure (BVH), this will always be updated to live in
     # spatial coordinates and is tested against the signed distance field (who lives in constant material space) to
     # generate contact points.
-    body.bvh = BVH.make_bvh(
-        body.x,
-        body.surface,
-        engine.params.K,
-        engine.params.bvh_chunk_size,
-        engine.params.envelope,
-    )
+    if engine.params.use_spatial_hash: # Default is to use SpatialHash
+        engine.params.num_tets += len(body.T)
+        engine.params.avg_length = (engine.params.avg_length + _avg_tetrahedron_length(body)) / 2.0
+    else:    
+        body.bvh = BVH.make_bvh(
+            body.x,
+            body.surface,
+            engine.params.K,
+            engine.params.bvh_chunk_size,
+            engine.params.envelope,
+        )
 
     # To have proper global indexing into assembled matrices and vectors we need to know this body nodel
     # index offset into this global space.

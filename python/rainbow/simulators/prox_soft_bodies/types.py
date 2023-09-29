@@ -1,5 +1,6 @@
 import rainbow.math.vector3 as V3
 from rainbow.simulators.prox_soft_bodies.mechanics import *
+from rainbow.geometry.hash import SpatialHash
 
 
 class SurfacesInteraction:
@@ -253,7 +254,11 @@ class Parameters:
         )
         self.resolution = 64  # The number of grid cells along each axis in the signed distance fields.
         self.use_gpu = True  # Boolean flag that indicates if we should use GPU computing or not.
-        self.speedup = True  
+        self.speedup = True
+        self.use_spatial_hash = True
+        self.num_tets = 0
+        self.avg_length = 0
+
 
 
 class Engine:
@@ -286,3 +291,4 @@ class Engine:
         )  # All contact points in last call of collision detection system.
         self.number_of_nodes = 0  # The total number of nodes in the world.
         self.stepper = None  # A reference to the time-stepper used to simulator forward.
+        self.spatial_hash = SpatialHash(1.2)

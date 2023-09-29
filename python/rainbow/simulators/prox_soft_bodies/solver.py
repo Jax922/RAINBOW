@@ -8,6 +8,7 @@ import scipy.sparse as sparse
 from typing import List
 from rainbow.simulators.prox_soft_bodies.types import Engine
 from rainbow.util.timer import Timer
+from joblib import Parallel, delayed
 
 
 class ElementArrayUtil:
@@ -683,6 +684,22 @@ def compute_mass_matrix(engine, stats, debug_on):
         stats["compute_mass_matrix"] = timer.elapsed
     return M
 
+def _lame_compute(E, nu):
+    lambda_in = MECH.first_lame(E, nu)
+    mu_in = MECH.second_lame(E, nu)
+    return lambda_in, mu_in
+
+def _compute_elastic_forces_core(body, x):
+    F = Native.compute_deformation_gradient(
+            x[body.offset: body.offset + len(body.x)], body.T, body.invD0
+        )
+    lambda_in, mu_in = _lame_compute(body.material_description.E, body.material_description.nu)
+    pk1_stress = body.material_description.constitutive_model.pk1_stress
+    return body.offset, len(body.u), Native.compute_elastic_forces(
+        x[body.offset: body.offset + len(body.x)],
+        body.T, body.gradN0, F, lambda_in, mu_in, pk1_stress
+    )
+
 
 def compute_elastic_forces(x, engine, stats, debug_on):
     """
@@ -698,30 +715,32 @@ def compute_elastic_forces(x, engine, stats, debug_on):
     if debug_on:
         timer = Timer("compute_elastic_forces")
         timer.start()
+
     forces = np.zeros((engine.number_of_nodes, 3), dtype=np.float64)
     for body in engine.bodies.values():
         # Precomputed deformation gradient
         F = Native.compute_deformation_gradient(
-            x[body.offset: body.offset + len(body.x)], body.T, body.invD0
-        )
+                x[body.offset: body.offset + len(body.x)], body.T, body.invD0
+            )
         # Convert soft body elastic parameters into Lame parameters
+            
         lambda_in = MECH.first_lame(
-            body.material_description.E, body.material_description.nu
-        )
+                    body.material_description.E, body.material_description.nu
+                )
         mu_in = MECH.second_lame(
-            body.material_description.E, body.material_description.nu
-        )
+                    body.material_description.E, body.material_description.nu
+                )
         pk1_stress = body.material_description.constitutive_model.pk1_stress
         body.Fe = Native.compute_elastic_forces(
-            x[body.offset: body.offset + len(body.x)],
-            body.T,
-            body.gradN0,
-            F,
-            lambda_in,
-            mu_in,
-            pk1_stress,
-        )
-        forces[body.offset : body.offset + len(body.u)] = body.Fe
+                    x[body.offset: body.offset + len(body.x)],
+                    body.T,
+                    body.gradN0,
+                    F,
+                    lambda_in,
+                    mu_in,
+                    pk1_stress,
+                )
+        forces[body.offset : body.offset + len(body.u)] = body.Fe    
     if debug_on:
         timer.end()
         stats["compute_elastic_forces"] = timer.elapsed

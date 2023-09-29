@@ -5,6 +5,7 @@ import rainbow.geometry.barycentric as BC
 from rainbow.simulators.prox_soft_bodies.types import *
 from rainbow.util.timer import Timer
 import numpy as np
+from collections import defaultdict
 from itertools import combinations
 from numba import cuda, jit
 
@@ -41,6 +42,11 @@ def _update_bvh(engine, stats, debug_on):
         stats["update_bvh"] = update_bvh_timer.elapsed
     return stats
 
+def _narrow_phase_hash(engine, stats, debug_on):
+    narrow_phase_timer = None
+    if debug_on:
+        narrow_phase_timer = Timer("narrow_phase", 8)
+        narrow_phase_timer.start()
 
 def _narrow_phase(engine, stats, debug_on):
     """
@@ -212,7 +218,7 @@ def _compute_contacts(engine, stats, bodyA, bodyB, results, debug_on):
         # We have now optimized for the deepest penetrating point on the triangle, and now we can use this
         # point and the SDF from body B to generate a contact point between body A and body B. First we test
         # if our triangle point is even inside axis aligned bounding box (AABB) around the SDF of body B.
-        if GRID.is_inside(bodyB.grid, x_i):
+        if GRID.is_inside(bodyB.grid, x_i, 0.1):
             # If we are inside the AABB then we look up the actual SDF value at the point. If the SDF value
             # is non-positive then we know we have a "true" contact point.
             phi = GRID.get_value(bodyB.grid, x_i)
@@ -317,9 +323,10 @@ def _contact_point_computing_gpu(overlaps, engine, stats, debug_on):
             bodyB_idxs.append(bodyB.idx)
             resultss.append((triA, triB))
 
-            bodyA_idxs.append(bodyB.idx)
-            bodyB_idxs.append(bodyA.idx)
-            resultss.append((triB, triA))
+            if not engine.params.use_spatial_hash: 
+                bodyA_idxs.append(bodyB.idx)
+                bodyB_idxs.append(bodyA.idx)
+                resultss.append((triB, triA))
     
     if len(resultss) == 0:
         return stats
@@ -483,13 +490,13 @@ def _contact_determination(overlaps, engine, stats, debug_on):
             ],  # Observe we swap columns because role of body A and body B is swapped.
             debug_on,
         )
+    
     if debug_on:
         contact_determination_timer.end()
         stats["contact_determination"] = contact_determination_timer.elapsed
     return stats
 
 def _cp_unique_id(cp):
-    # 这是一个简单的标识生成器，它基于bodyA, bodyB和p来生成唯一的标识
     return (cp.bodyA, cp.bodyB, tuple(cp.p))
 
 def _optimize_contact_reduction(engine, stats, debug_on):
@@ -555,6 +562,116 @@ def _contact_reduction(engine, stats, debug_on):
         stats["contact_point_reduction"] = reduction_timer.elapsed
     return stats
 
+def _get_min_max_coord(verteies, axis):
+    return min(vertex[axis] for vertex in verteies), max(vertex[axis] for vertex in verteies)
+
+
+def _create_AABB_from_tetrahedron(vertices):
+    min_x, max_x = _get_min_max_coord(vertices, 0)
+    min_y, max_y = _get_min_max_coord(vertices, 1)
+    min_z, max_z = _get_min_max_coord(vertices, 2)
+
+    return {
+        'min': [min_x, min_y, min_z],
+        'max': [max_x, max_y, max_z]
+    }
+
+def _get_cell_range(aabb, cell_size, offset, axis):
+    return int((aabb['min'][axis] + offset) // cell_size), int((aabb['max'][axis] + offset) // cell_size)
+
+def tetrahedron_volume(v0, v1, v2, v3):
+    return abs(np.dot((v1 - v0), np.cross(v2 - v0, v3 - v0))) / 6.0
+
+def _point_inside_tetrahedron(p, x0, x1, x2, x3):
+    T = np.array([x0, x1, x2, x3]).T
+    v = np.linalg.solve(T, p)
+    w = np.append(v, 1 - np.sum(v))
+
+    return all(0 <= wi <= 1 for wi in w)
+
+# def _point_inside_tetrahedron(p, x0, x1, x2, x3):
+#     epsilon = 1e-10
+#     A = np.array([x1 - x0, x2 - x0, x3 - x0]).T
+#     beta = np.linalg.inv(A).dot(p - x0)
+#     alpha = 1-sum(beta)
+#     return -epsilon <= alpha <= 1 + epsilon and all(-epsilon <= val <= 1 + epsilon for val in beta)
+    # return beta[0] >= -epsilon and beta[1] >= -epsilon and beta[2] >= -epsilon and sum(beta) <= (1 + epsilon)
+
+def _point_inside_tetrahedron(p, x0, x1, x2, x3):
+    px0 = x0 - p
+    px1 = x1 - p
+    px2 = x2 - p
+    px3 = x3 - p
+
+    N = np.cross(px0, px1)
+    volume = np.dot(px3, N) / 6.0
+    return volume >= 0
+
+def _overlap_detection(engine, tet_aabbs, stats, debug_on):
+    _results = defaultdict(set)
+    for key, _aabb in tet_aabbs.items():
+        tri_idx, tet_idx, body_name = key
+        body = engine.bodies[body_name]
+        tet_vertices = np.array(body.x[body.T[tet_idx], :])
+
+        min_x, max_x = _get_cell_range(_aabb, engine.spatial_hash.cell_size, engine.spatial_hash.offset, 0)
+        min_y, max_y = _get_cell_range(_aabb, engine.spatial_hash.cell_size, engine.spatial_hash.offset, 1)
+        min_z, max_z = _get_cell_range(_aabb, engine.spatial_hash.cell_size, engine.spatial_hash.offset, 2)
+
+        for x in range(min_x, max_x + 1):
+            for y in range(min_y, max_y + 1):
+                for z in range(min_z, max_z + 1):
+                    hash_collisions = engine.spatial_hash.query(x, y, z, body_name, tet_idx)
+                    if len(hash_collisions):
+                        for hash_info in hash_collisions:
+                            if _point_inside_tetrahedron(np.array(hash_info.verteies), tet_vertices[0], tet_vertices[1], tet_vertices[2], tet_vertices[3]):
+                                _results[(body_name, hash_info.body)].add((tri_idx, hash_info.tri_idx))
+    return _results
+
+def _update_spatial_hash(engine, stats, debug_on):
+
+    narrow_phase_timer = None
+    if debug_on:
+        narrow_phase_timer = Timer("narrow_phase", 8)
+        narrow_phase_timer.start()
+
+    ## setting hash table size
+    engine.spatial_hash.clear()
+    engine.spatial_hash.set_hash_table_size(engine.params.num_tets)
+    engine.spatial_hash.set_cell_size(engine.params.avg_length if engine.params.avg_length > 0.5 else 0.5)
+    
+    ## First phase: 
+    ##      1. insert all vertices into the hash table
+    ##      2. create AABBs for all tetrahedrons
+    tet_aabbs = dict()
+    for body in engine.bodies.values():
+        for tri_idx, vertices in enumerate(body.surface):
+
+            tet_idx = body.owners[tri_idx][0]
+            tet_vertices = body.x[body.T[tet_idx], :]
+            tet_aabb = _create_AABB_from_tetrahedron(tet_vertices)
+            tet_aabbs[(tri_idx, tet_idx, body.name)] = tet_aabb
+
+            for v in vertices:
+                coords = body.x[v]
+                engine.spatial_hash.insert(v, tri_idx, tet_idx, body.name, coords[0], coords[1], coords[2])
+    
+    ## Second phase: overlap testing for all tetrahedrons with vertices in the hash table
+    _results = _overlap_detection(engine, tet_aabbs, stats, debug_on)
+
+    results = dict()
+    for key in _results:
+        b1, b2 = key
+        results[(engine.bodies[b1], engine.bodies[b2])] = np.array(list(_results[key]))
+    
+    if debug_on:
+        narrow_phase_timer.end()
+        stats["narrow_phase"] = narrow_phase_timer.elapsed
+        stats["number_of_overlaps"] = np.sum(
+            [len(results) for results in _results.values()]
+        )
+
+    return results, stats
 
 def run_collision_detection(engine, stats, debug_on):
     """
@@ -578,8 +695,13 @@ def run_collision_detection(engine, stats, debug_on):
     if debug_on:
         collision_detection_timer = Timer("collision_detection")
         collision_detection_timer.start()
-    stats = _update_bvh(engine, stats, debug_on)
-    overlaps, stats = _narrow_phase(engine, stats, debug_on)
+
+    if engine.params.use_spatial_hash:
+        overlaps, stats= _update_spatial_hash(engine, stats, debug_on)
+    else:
+        stats = _update_bvh(engine, stats, debug_on)
+        overlaps, stats = _narrow_phase(engine, stats, debug_on)
+        
     stats = _contact_determination(overlaps, engine, stats, debug_on)
     stats = _contact_reduction(engine, stats, debug_on)
     if debug_on:

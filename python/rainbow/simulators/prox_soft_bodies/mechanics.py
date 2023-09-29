@@ -38,7 +38,6 @@ def cauchy_stress_tensor(F, S):
     )
     return sigma
 
-
 def create_material_parameters(name=None):
     """
     Convenience function to quickly get some "sensible" material parameters.
@@ -89,7 +88,6 @@ def create_material_parameters(name=None):
         rho = 2190
     return E, nu, rho
 
-
 def first_lame(E, nu):
     """
     Convert elastic parameters into Lamé parameters.
@@ -99,7 +97,6 @@ def first_lame(E, nu):
     :return:    The corresponding value of the first Lamé parameter (lambda)
     """
     return (nu * E) / ((1 + nu) * (1 - 2 * nu))
-
 
 def second_lame(E, nu):
     """
