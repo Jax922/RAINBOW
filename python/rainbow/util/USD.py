@@ -65,6 +65,30 @@ class USD:
             raise ValueError(f'Mesh {name} does not exist')
         vertex_positions = Vt.Vec3fArray(V.tolist())
         self.meshes[name].GetPointsAttr().Set(vertex_positions, time)
+    
+    def get_mesh_positions(self, name: str, time: float) -> ArrayLike:
+        """ Retrieve the positions of a mesh at a given timestamp.
+
+        Args:
+            name (str): The name of the mesh.
+            time (float): The timestamp at which the positions should be retrieved.
+
+        Returns:
+            ArrayLike: An array containing the vertex positions of the mesh.
+
+        Raises:
+            ValueError: If the mesh does not exist in the scene, or if the mesh does not have positions set at the given timestamp.
+        """
+        if name not in self.meshes:
+            raise ValueError(f'Mesh {name} does not exist')
+        
+        vertex_positions_attr = self.meshes[name].GetPointsAttr()
+        vertex_positions = vertex_positions_attr.Get(time)
+
+        if vertex_positions:
+            return np.array(vertex_positions, dtype=np.float64)
+        else:
+            raise ValueError(f"No positions set for mesh {name} at time {time}")
 
     def set_animation_time(self, duration: float) -> None:
         """ Set the total animation time of the scene
