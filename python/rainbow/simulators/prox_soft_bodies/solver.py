@@ -1114,8 +1114,9 @@ class SemiImplicitStepper:
 
             mu = get_friction_coefficient_vector(engine)
             b = J.dot(u_prime)
+            prox_model = GS.prox_sphere_nb if engine.params.proxmial_speedup else GS.prox_sphere
             sol, stats = GS.solve(
-                J, WJT, b, mu, GS.prox_sphere, engine, stats, debug_on, "gauss_seidel_"
+                J, WJT, b, mu, prox_model, engine, stats, debug_on, "gauss_seidel_"
             )
             WPc = WJT.dot(sol)
 
