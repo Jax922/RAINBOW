@@ -1159,3 +1159,16 @@ class SemiImplicitStepper:
             stats["elastic_energy"] = compute_elastic_energy(engine, stats, debug_on)
             stats["max_penetration"] = get_largest_penetration_error(engine)
             self.log.append(stats)
+
+
+class ImplicitSteper:
+    def __init__(self, engine: Engine, debug_on: bool) -> None:
+        self.log = []
+        stats = {}
+        self.W = compute_inverse_mass_matrix(engine, stats, debug_on)
+        if debug_on:
+            self.log.append(stats)
+
+    def step(self, dt: float, engine: Engine, debug_on: bool) -> None:
+        pass
+        
