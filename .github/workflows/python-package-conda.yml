@@ -4,7 +4,7 @@ name: Testing your commit on RAINBOW
 
 on:
   push:
-    branches: [ main ]
+    branches: [ test/auto-unit-tdest ]
   pull_request:
     branches: [ main ]
 jobs:
