@@ -1,6 +1,78 @@
 import rainbow.math.matrix3 as M3
 import numpy as np
 
+def svd_rotation_variant(F):
+    """ 
+    Perform a rotation variant of the Singular Value Decomposition (SVD) on a matrix.
+
+    This function computes the SVD of a 3x3 matrix, with additional steps to handle rotations
+    and ensure that the U and V matrices do not contain reflections. If a reflection is detected
+    in U or V, it is corrected by adjusting the corresponding singular values.
+
+    :param F: deformation gradient.
+    :return: A tuple containing three elements:
+        U (numpy.ndarray): A 3x3 orthogonal matrix U from the SVD.
+        Sigma (numpy.ndarray): A 3x3 diagonal matrix of singular values.
+        V (numpy.ndarray): A 3x3 orthogonal matrix V from the SVD.
+    """
+    U, Sigma, Vt = np.linalg.svd(F)
+    U, V = U, Vt.T
+
+    L = np.identity(3)
+    L[2, 2] = np.linalg.det(U @ V.T)
+
+    detU = np.linalg.det(U)
+    detV = np.linalg.det(V)
+
+    if detU < 0 and detV > 0:
+        U = U @ L
+    if detU > 0 and detV < 0:
+        V = V @ L
+
+    Sigma[2] *= L[2, 2]
+    return U, Sigma, V
+
+def build_twist_and_flip_eigenvectors(U, V):
+    sqrt_2_inv = 1.0 / np.sqrt(2.0)
+
+    # Twist matrices
+    T0 = np.array([[0, 0, 0], [0, 0, -1], [0, 1, 0]])  # x-twist
+    T1 = np.array([[0, 0, 1], [0, 0, 0], [-1, 0, 0]])  # y-twist
+    T2 = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 0]])  # z-twist
+
+    Q0 = sqrt_2_inv * (U @ T0 @ V.T)
+    Q1 = sqrt_2_inv * (U @ T1 @ V.T)
+    Q2 = sqrt_2_inv * (U @ T2 @ V.T)
+
+    # Flip matrices
+    L0 = np.array([[0, 0, 0], [0, 0, 1], [0, 1, 0]])  # x-flip
+    L1 = np.array([[0, 0, 1], [0, 0, 0], [1, 0, 0]])  # y-flip
+    L2 = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 0]])  # z-flip
+
+    Q3 = sqrt_2_inv * (U @ L0 @ V.T)
+    Q4 = sqrt_2_inv * (U @ L1 @ V.T)
+    Q5 = sqrt_2_inv * (U @ L2 @ V.T)
+
+    # Flatten matrices and combine
+    Q = np.column_stack([Q0.flatten(), Q1.flatten(), Q2.flatten(),
+                         Q3.flatten(), Q4.flatten(), Q5.flatten()])
+    return Q
+
+
+def build_scaling_eigenvectors(U, Q, V):
+    # 提取 Q 矩阵的列向量
+    q0, q1, q2 = Q[:, 0], Q[:, 1], Q[:, 2]
+
+    # 计算缩放模式矩阵
+    Q0 = U @ np.diag(q0) @ V.T
+    Q1 = U @ np.diag(q1) @ V.T
+    Q2 = U @ np.diag(q2) @ V.T
+
+    # 将矩阵展平为一维数组，并合并到 Q9 中
+    Q9 = np.column_stack([Q0.flatten(), Q1.flatten(), Q2.flatten()])
+    return Q9
+
+
 
 def right_cauchy_strain_tensor(F):
     """
@@ -194,6 +266,60 @@ class SVK:
         C = np.matmul(F.T, F)
         E = (C - np.eye(3)) / 2
         return 0.5 * lambda_in * np.trace(E) ** 2 + mu_in * np.tensordot(E, E)
+
+    @staticmethod
+    def hessian(F, lambda_in, mu_in):
+        """
+        Compute the Hessian of the energy density.
+
+        :param F:           The deformation gradient
+        :param lambda_in:   The first Lame parameter
+        :param mu_in:       The second Lame parameter
+        :return:            The Hessian of the energy density.
+        """
+        U, Sigma, Vt = svd_rotation_variant(F)
+        I2 = np.sum(Sigma**2)
+        front = -mu_in + lambda_in * 0.5 * (I2 - 3.0)
+        s_sq = Sigma**2
+        
+        s_sq = Sigma ** 2
+        s0s1 = Sigma[0] * Sigma[1]
+        s0s2 = Sigma[0] * Sigma[2]
+        s1s2 = Sigma[1] * Sigma[2]
+
+        # Twist and flip modes
+        eigenvalues = np.empty(9)
+        # s_products = np.array([s1s2, s0s2, s0s1])  
+        eigenvalues[:3] = [front + mu_in * (s_sq[1] + s_sq[2] - s1s2),
+                   front + mu_in * (s_sq[0] + s_sq[2] - s0s2),
+                   front + mu_in * (s_sq[0] + s_sq[1] - s0s1)]
+
+        eigenvalues[3:6] = [front + mu_in * (s_sq[1] + s_sq[2] + s1s2),
+                            front + mu_in * (s_sq[0] + s_sq[2] + s0s2),
+                            front + mu_in * (s_sq[0] + s_sq[1] + s0s1)]
+
+       # Scaling mode matrix
+        A = np.diag(front + (lambda_in + 3.0 * mu_in) * s_sq)
+        Sigma_outer = np.outer(Sigma, Sigma)
+        i_upper = np.triu_indices(3, 1)
+        A[i_upper] = lambda_in * Sigma_outer[i_upper]
+        A.T[i_upper] = A[i_upper]  # Fill the lower triangle
+
+        # Scaling modes
+        Lambda, Q = np.linalg.eig(A)
+        eigenvalues[6:] = Lambda
+
+        # Compute the eigenvectors
+        eigenvectors = np.zeros((9, 9))
+        eigenvectors[:, :6] = build_twist_and_flip_eigenvectors(U, Vt)
+        eigenvectors[:, 6:] = build_scaling_eigenvectors(U, Q, Vt)
+
+        # 将特征值限制为非负值
+        eigenvalues = np.maximum(eigenvalues, 0.0)
+
+        # 计算 Hessian 矩阵
+        return eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+
 
 
 class COR:

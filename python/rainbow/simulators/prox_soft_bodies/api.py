@@ -396,7 +396,8 @@ def simulate(engine, T: float, debug_on: bool = False) -> None:
     if T <= 0:
         raise ValueError("Time must be positive")
     if engine.stepper is None:
-        engine.stepper = SOLVER.SemiImplicitStepper(engine, debug_on)
+        # engine.stepper = SOLVER.SemiImplicitStepper(engine, debug_on)
+        engine.stepper = SOLVER.ImplicitStepper(engine, debug_on)
     T_left = T
     while T_left:
         dt = min(T_left, engine.params.time_step)

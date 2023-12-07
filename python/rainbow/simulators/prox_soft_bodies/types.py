@@ -191,6 +191,11 @@ class SoftBody:
         self.gravity = V3.make(0, -9.82, 0)  # Gravitational acceleration on this body.
         self.is_lumped = True  # Boolean flag that indicates if the body should be lumped or not.
         self.is_fixed = False  # Boolean flag that indicates if tbe body should be fixed or not.
+        self.V = None  # The volume of each tetrahedron of the soft body.
+        self.dFx = None  # The derivative of the deformation gradient on position.
+        self.F = None  # The deformation gradient.
+        
+
 
 
 class Parameters:

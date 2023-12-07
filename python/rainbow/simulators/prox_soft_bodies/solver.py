@@ -5,9 +5,11 @@ import rainbow.math.vector3 as V3
 import rainbow.math.matrix3 as M3
 import numpy as np
 import scipy.sparse as sparse
+import scipy.optimize as optimize
 from typing import List
 from rainbow.simulators.prox_soft_bodies.types import Engine
 from rainbow.util.timer import Timer
+
 
 
 class ElementArrayUtil:
@@ -220,6 +222,112 @@ class Native:
         for e in range(len(T)):
             F[e] = np.dot(D[e], invD0[e])
         return F
+
+    @staticmethod
+    def compute_derivative_Fx(x, T, invD0s):
+        """
+        Computes the derivative of the deformation gradient w.r.t. the spatial coordinates.
+
+        :param x:          The current spatial nodal positions.
+        :param T:          The tetrahedral elements.
+        :param invD0s:      The inverse material edge-matrix.
+        :return:           The derivative of the deformation gradient w.r.t. the spatial coordinates.
+        """
+
+        dFs = np.zeros((len(T), 9, 12), dtype=np.float64)
+        for e in range(len(T)):
+            m, n, o = invD0s[e][0, :]
+            p, q, r = invD0s[e][1, :]
+            s, t, u = invD0s[e][2, :]
+
+            t1 = -m - p - s
+            t2 = -n - q - t
+            t3 = -o - r - u
+
+            dF = np.zeros((9, 12))
+
+            dF[0, 0] = dF[1, 1] = dF[2, 2] = t1
+            dF[0, 3] = dF[1, 4] = dF[2, 5] = m
+            dF[0, 6] = dF[1, 7] = dF[2, 8] = p
+            dF[0, 9] = dF[1, 10] = dF[2, 11] = s
+
+            dF[3, 0] = dF[4, 1] = dF[5, 2] = t2
+            dF[3, 3] = dF[4, 4] = dF[5, 5] = n
+            dF[3, 6] = dF[4, 7] = dF[5, 8] = q
+            dF[3, 9] = dF[4, 10] = dF[5, 11] = t
+
+            dF[6, 0] = dF[7, 1] = dF[8, 2] = t3
+            dF[6, 3] = dF[7, 4] = dF[8, 5] = o
+            dF[6, 6] = dF[7, 7] = dF[8, 8] = r
+            dF[6, 9] = dF[7, 10] = dF[8, 11] = u
+
+            dFs[e] = dF
+        return dFs
+            
+    
+    @staticmethod
+    def compute_volume(x, T):
+        """
+        Computes the volume of each tetrahedron.
+
+        :param x:          The current spatial nodal positions.
+        :param T:          The tetrahedral elements.
+        :return:           The volume of each tetrahedron.
+        """
+        vol = np.zeros(len(T), dtype=np.float64)
+        for e in range(len(T)):
+            i, j, k, m = T[e]
+            ri = x[i]
+            rj = x[j]
+            rk = x[k]
+            rm = x[m]
+            # Compute edge vectors
+            u_ji = rj - ri
+            u_kj = rk - rj
+            u_ik = ri - rk
+            u_mi = rm - ri
+            u_mj = rm - rj
+            # Compute volume
+            vol[e] = np.dot(u_mi, np.cross(u_ji, u_kj)) / 6
+        return vol
+
+    @staticmethod
+    def compute_derivative_velocity(T, u, invD0s):
+        dVs = []
+
+        for e in T:
+            # 提取四面体的每个顶点的速度
+            v = [u[3 * idx: 3 * idx + 3] for idx in e]
+
+            # 构建速度差矩阵 V
+            V = np.column_stack([v[1] - v[0], v[2] - v[0], v[3] - v[0]])
+
+            # 计算速度梯度并存储
+            dV = V @ invD0s[T.index(e)]
+            dVs.append(dV)
+        
+        return dVs
+
+
+    @staticmethod
+    def compute_hyperelastic_hessisn(T, Vs, dFs, Fs, lambda_, mu_, hessian_pk1_stress):
+        """
+        Computes the derivative of the PK1 stress, clamped to semi-positive definiteness
+
+        :return:           The Hessian element array.
+        """
+        per_element_hessians = []
+        for i in range(len(T)):
+            F = Fs[i]
+            dF = dFs[i]
+            hessian = -Vs[i] * hessian_pk1_stress(F, lambda_, mu_)
+
+            # Assuming dF is pFpx in your C++ code
+            hessian_product = dF.T @ hessian @ dF
+            per_element_hessians.append(hessian_product)
+
+        return per_element_hessians
+
 
     @staticmethod
     def compute_mass_element_array(rho, vol, T, is_lumped):
@@ -1159,3 +1267,235 @@ class SemiImplicitStepper:
             stats["elastic_energy"] = compute_elastic_energy(engine, stats, debug_on)
             stats["max_penetration"] = get_largest_penetration_error(engine)
             self.log.append(stats)
+
+
+def get_deformation_gradient(engine, t1, t2, debug_on):
+    """
+    This function computes the deformation gradient of a tetrahedron.
+
+    :param engine:      The current engine instance we are working with.
+    :param t1:          The first node index of the tetrahedron.
+    :param t2:          The second node index of the tetrahedron.
+    :param debug_on:    Boolean flag for toggling debug (aka profiling) info on and off.
+    :return:            The deformation gradient of the tetrahedron.
+    """
+    timer = None
+    if debug_on:
+        timer = Timer("get_deformation_gradient")
+        timer.start()
+    body = engine.bodies[0]
+    F = Native.compute_deformation_gradient(
+        body.x[body.offset + t1 : body.offset + t1 + 3],
+        body.T,
+        body.invD0,
+    )
+    if debug_on:
+        timer.end()
+        stats["get_deformation_gradient"] = timer.elapsed
+    return F
+
+
+def compute_global_stiffness_matrix(x, engine):
+    N = engine.number_of_nodes  # Total number of nodes in the world
+    global_stiffness_matrix = sparse.lil_matrix((N * 3, N * 3))
+    for body in engine.bodies.values():
+        # Precomputed deformation gradient
+        F = Native.compute_deformation_gradient(
+            x[body.offset: body.offset + len(body.x)], body.T, body.invD0
+        )
+        # Convert soft body elastic parameters into Lame parameters
+        lambda_in = MECH.first_lame(
+            body.material_description.E, body.material_description.nu
+        )
+        mu_in = MECH.second_lame(
+            body.material_description.E, body.material_description.nu
+        )
+        dFs = Native.compute_derivative_Fx(body.x, body.T, body.invD0)
+        Vs = Native.compute_volume(body.x, body.T)
+        per_element_hessians = Native.compute_hyperelastic_hessisn(body.T, Vs, dFs, F, lambda_in, mu_in, body.material_description.constitutive_model.hessian)
+        # T, Vs, dFs, Fs, lambda_, mu_, hessian_pk1_stress
+
+        for i, tet in enumerate(body.T):
+            H = per_element_hessians[i]
+            for y in range(4):
+                y_vertex_global = tet[y] + body.offset
+                for z in range(4):
+                    z_vertex_global = tet[z] + body.offset
+                    for b in range(3):
+                        for a in range(3):
+                            row = 3 * y_vertex_global + b
+                            col = 3 * z_vertex_global + a
+                            entry = H[3 * z + a, 3 * y + b]
+                            global_stiffness_matrix[row, col] += entry
+
+    return sparse.csr_matrix(global_stiffness_matrix)
+
+
+
+def compute_global_damping_matrix(engine):
+    # 初始化全局阻尼矩阵
+    N = engine.number_of_nodes
+    global_C = sparse.lil_matrix((N * 3, N * 3))
+
+    # 遍历所有物体
+    for body in engine.bodies.values():
+        # 获取该物体的局部阻尼矩阵
+        C_array = body.C_array
+
+        # 遍历物体的所有四面体元素
+        for e, tet in enumerate(body.T):
+            for local_i in range(4):
+                for local_j in range(4):
+                    # 获取全局节点索引
+                    global_i = body.offset + tet[local_i]
+                    global_j = body.offset + tet[local_j]
+
+                    # 将局部矩阵的值添加到全局矩阵的相应位置
+                    for d_i in range(3):
+                        for d_j in range(3):
+                            global_C[3 * global_i + d_i, 3 * global_j + d_j] += C_array[e, local_i, local_j, d_i, d_j]
+
+    # 将全局阻尼矩阵转换为 CSR 格式以提高计算效率
+    global_C = global_C.tocsr()
+    
+    return global_C
+
+
+class ImplicitStepper:
+    """
+    This class implements a semi-implicit first order Euler time-stepper.
+    """
+    def __init__(self, engine: Engine, debug_on: bool) -> None:
+        self.log = []
+        stats = {}
+        self.W = compute_inverse_mass_matrix(engine, stats, debug_on)
+        if debug_on:
+            self.log.append(stats)
+
+    def step(self, dt: float, engine: Engine, debug_on: bool) -> None:
+        """
+        This method advances time in the world modelled by the engine by the time-step size dt.
+
+        :param dt:          The time-step size to advance the world state by.
+        :param engine:      The current engine instance we are working with.
+        :param debug_on:    Boolean flag for toggling debug (aka profiling) info on and off.
+        :return:            None.
+        """
+        # 2022-03-27 Kenny TODO: This function should be redesigned to "semi_implicit_stepper" and
+        #                   one should feed in the contact states, x and u vectors that it should work
+        #                   on. This may it would be easier to use the stepper as a building block in
+        #                   more advanced simulation loops. The semi-implicit-stepper should then be
+        #                   called from API.simulate function. The stepper should not depend on state
+        #                   information stored in the bodies. Bodies should just be shallow views into
+        #                   global state-vectors and force vectors.
+        #                   The global inverse mass and mass matrices should also only be reassembled once (or
+        #                   reassembled when changes happen to the world). The current implementation rebuilds
+        #                   everything in every step taken. If semi-implicit-stepper changed interface to take
+        #                   the inverse-mass matrix as input then this assembly could be done elsewhere.
+        timer = None
+        if debug_on:
+            timer = Timer("Stepper")
+            timer.start()
+
+        stats = {}
+
+        x = get_position_vector(engine)
+        apply_boundary_conditions_on_positions(x, engine)
+
+        u = get_velocity_vector(engine)
+        apply_boundary_conditions_on_velocities(u, engine)
+
+        Fe = compute_elastic_forces(x, engine, stats, debug_on)
+        Ft = compute_traction_forces(x, engine, stats, debug_on)
+        Fd = compute_damping_forces(u, engine, stats, debug_on)
+        # TODO 2021-12-06 Kenny: If gravity is the only external force then it is constant,
+        #  and it does not make sense to recompute gravity forces in every stepper call.
+        Fext = compute_external_forces(engine, stats, debug_on)
+        F_tot = Fext + Fe + Ft + Fd
+
+        K = compute_global_stiffness_matrix(x, engine)
+        print("stiffness K matrix:", K.shape)
+        C = compute_global_damping_matrix(engine)
+        print("damping C matrix:", C.shape)
+
+        # --- Convert from N-by-3 into 3N-by-1 vector format ------------------
+        # TODO 2021-12-07 Kenny: This seems a bit silly to make this conversion. It should be abstracted
+        #  away such that a developer can focus more on the high-level aspects of time integration and
+        #  writing solver code.
+        u = np.reshape(u, (-1))
+        F_tot = np.reshape(F_tot, (-1))
+        # ---------------------------------------------------------------------
+
+        u_prime = u + dt * self.W.dot(F_tot)
+
+        # TODO 2021-12-07 Kenny: The whole collision detection system uses body positions (state info) stored in body
+        #  instances and not stored in global position vectors. This provides a design problem if one wish to perform
+        #  collision detection at a future predicted position. Currently, in our semi-implicit first order
+        #  time-integration this does not prove to be a problem as we do collision detection at the current/initial
+        #  positions only. However, implementing backward Euler type of methods would require us to do collision
+        #  detection at a future predicted position. Solution would be to pass the global x-vector to the collision
+        #  detection sub-system.
+
+        # Find contact points
+        stats = CD.run_collision_detection(engine, stats, debug_on)
+
+        # Calculate contact forces
+        J = None
+        WJT = None
+        WPc = np.zeros(u_prime.shape, dtype=np.float64)
+        if len(engine.contact_points) > 0:
+
+            J = compute_jacobian_matrix(engine, stats, debug_on)
+            WJT = self.W.dot(J.T)
+
+            if engine.params.use_pre_stabilization:
+                raise ValueError("Pre-stabilization has not been implemented")
+
+            mu = get_friction_coefficient_vector(engine)
+            b = J.dot(u_prime)
+            sol, stats = GS.solve(
+                J, WJT, b, mu, GS.prox_sphere, engine, stats, debug_on, "gauss_seidel_"
+            )
+            WPc = WJT.dot(sol)
+
+        # --- Convert from 3N-by-1 into N-by-3 vector format -----------------
+        # TODO 2021-12-07 Kenny: This seems a bit silly to make this conversion. It should be abstracted
+        #  away such that a developer can focus more on the high-level aspects of time integration and
+        #  writing solver code.
+        u_prime = np.reshape(u_prime, (-1, 3))
+        WPc = np.reshape(WPc, (-1, 3))
+        # ---------------------------------------------------------------------
+
+        # Semi-implicit time integration
+        apply_boundary_conditions_on_velocities(u_prime, engine)
+        u = u_prime + WPc
+        apply_boundary_conditions_on_velocities(u, engine)
+        x += u * dt
+        apply_boundary_conditions_on_positions(x, engine)
+
+        set_velocity_vector(u, engine)
+        set_position_vector(x, engine)
+
+        if engine.params.use_post_stabilization:
+            if len(engine.contact_points) > 0:
+                # TODO 2021-12-07 Kenny: Here we re-use the contact Jacobian information we retried from the collision
+                #  detection query earlier on. Again the interface here might not be generic enough for fitting into
+                #  other time-stepping schemes. One could "build" the post stabilization routine as a specialized
+                #  stepper in its own right. This might be cool for pre-processing of simulations to make sure
+                #  no penetrations are initially present.
+                stats = apply_post_stabilization(J, WJT, engine, stats, debug_on)
+        
+        # Update time stamp
+        engine.params.time_stamp += 1
+
+        if debug_on:
+            timer.end()
+            stats["stepper_time"] = timer.elapsed
+            stats["dt"] = dt
+            stats["contact_points"] = len(engine.contact_points)
+            stats["kinetic_energy"] = compute_kinetic_energy(engine, stats, debug_on)
+            stats["potential_energy"] = compute_potential_energy(engine, stats, debug_on)
+            stats["elastic_energy"] = compute_elastic_energy(engine, stats, debug_on)
+            stats["max_penetration"] = get_largest_penetration_error(engine)
+            self.log.append(stats)
+
